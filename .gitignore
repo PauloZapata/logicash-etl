@@ -1,0 +1,16 @@
+# --- DATOS (Nunca subir datos reales o mock pesados) ---
+data/
+*.csv
+*.parquet
+*.json
+
+# --- SISTEMA / ENTORNOS ---
+.DS_Store
+.env
+venv/
+.venv/
+env/
+
+# --- PYTHON CACHE ---
+__pycache__/
+*.py[cod]

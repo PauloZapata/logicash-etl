@@ -112,3 +112,46 @@ except Exception as e:
     sys.exit(1)
 
 print("--- Job Finalizado Exitosamente ---")
+
+# --- POST-ETL VALIDACIONES AUTOMÁTICAS ---
+print("\n🔍 === VALIDACIONES POST-PROCESAMIENTO ===")
+print("Ejecutando validaciones automáticas sobre datos procesados...")
+
+# Registramos df_clean como vista temporal para usar SQL
+df_clean.createOrReplaceTempView("transactions_clean")
+
+print("\n📊 Top 5 Cajeros con Más Dinero Movido:")
+print("=" * 50)
+top_atms_query = """
+    SELECT 
+        id_atm,
+        ubicacion,
+        COUNT(*) as total_transacciones,
+        ROUND(SUM(monto), 2) as dinero_total_movido,
+        ROUND(AVG(monto), 2) as monto_promedio
+    FROM transactions_clean 
+    GROUP BY id_atm, ubicacion
+    ORDER BY dinero_total_movido DESC
+    LIMIT 5
+"""
+spark.sql(top_atms_query).show(truncate=False)
+
+print("\n📅 Total de Dinero por Día (Validación de Particionado):")
+print("=" * 55)
+daily_summary_query = """
+    SELECT 
+        fecha_dia,
+        COUNT(*) as total_transacciones,
+        ROUND(SUM(monto), 2) as dinero_total_dia,
+        ROUND(MIN(monto), 2) as monto_minimo,
+        ROUND(MAX(monto), 2) as monto_maximo,
+        ROUND(AVG(monto), 2) as monto_promedio
+    FROM transactions_clean 
+    GROUP BY fecha_dia
+    ORDER BY fecha_dia DESC
+"""
+spark.sql(daily_summary_query).show(truncate=False)
+
+print("\n✅ Validaciones automáticas completadas.")
+
+print("--- Job Finalizado Exitosamente ---")

@@ -27,8 +27,8 @@ print("📁 Leyendo archivos CSV ...")
 
 try:
     # Definimos las rutas para mejor manejo de errores
-    df_atms_path = "data/raw/dim_atms.csv"
-    df_transactions_path = "data/raw/fact_transactions.csv"
+    df_atms_path = "s3://logicash-raw-paulozapata/dim_atms.csv"
+    df_transactions_path = "s3://logicash-raw-paulozapata/fact_transactions.csv"
     
     # Leemos Dimension ATMs
     df_atms = spark.read.format("csv") \
@@ -100,7 +100,7 @@ df_clean.select("id_transaccion", "fecha_dia", "monto", "ubicacion").show(5, tru
 print("\n💾 Guardando datos en formato Parquet...")
 
 # Ruta de salida
-output_path = "data/processed/fact_transactions"
+output_path = "s3://logicash-processed-paulozapata/fact_transactions"
 
 try:
     # AQUI ESTÁ LA CORRECCIÓN CLAVE:

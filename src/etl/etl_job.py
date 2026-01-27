@@ -5,7 +5,8 @@ from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
 # IMPORTANTE: Agregamos to_date para extraer solo la fecha del timestamp
-from pyspark.sql.functions import col, current_timestamp, to_date, broadcast 
+from pyspark.sql.functions import col, current_timestamp, to_date, broadcast
+from pyspark.sql.types import DecimalType 
 
 # --- PARTE A: BOILERPLATE (Configuración del motor de Glue) ---
 print ("--- Iniciando Job Logicash ETL ---")
@@ -76,6 +77,12 @@ df_clean = df_joined.filter(
 # Esto evita el problema de "Small Files" y "High Cardinality"
 print("📅 Generando columna de particionado (fecha_dia)...")
 df_clean = df_clean.withColumn("fecha_dia", to_date(col("fecha")))
+
+# --- CASTEO CRÍTICO PARA PRECISIÓN FINANCIERA ---
+# Convertimos 'monto' de Double/Float a DecimalType(18, 2) para evitar errores de precisión
+# DecimalType(18, 2) = hasta 18 dígitos totales con 2 decimales de precisión
+print("💰 Aplicando casteo de precisión financiera (monto -> DecimalType)...")
+df_clean = df_clean.withColumn("monto", col("monto").cast(DecimalType(18, 2)))
 
 count_clean = df_clean.count()
 discarded = count_raw - count_clean

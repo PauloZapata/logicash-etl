@@ -14,3 +14,28 @@ env/
 # --- PYTHON CACHE ---
 __pycache__/
 *.py[cod]
+
+# --- TERRAFORM (No subir estado ni cache) ---
+# Archivos de estado de Terraform
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Directorio de proveedores de Terraform
+.terraform/
+.terraform.lock.hcl
+
+# Variables sensibles de Terraform
+*.tfvars
+terraform.tfvars
+*.auto.tfvars
+
+# Logs de Terraform
+*.log
+
+# Crash logs
+crash.log
+crash.*.log
+
+# --- ARCHIVOS DUPLICADOS ---
+src/data_gen/etl/

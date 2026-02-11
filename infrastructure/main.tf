@@ -200,3 +200,135 @@ resource "aws_glue_job" "etl_job" {
     Project = "LogiCash"
   }
 }
+
+# ============================================================
+# 6. AWS STEP FUNCTIONS - ORQUESTACIÓN DEL PIPELINE
+# ============================================================
+# Automatiza el flujo completo: Crawler → Espera → ETL Job
+# Usa un loop de polling para verificar que el Crawler termine antes de lanzar el Job.
+
+# --- IAM ROLE PARA STEP FUNCTIONS ---
+# Trust Policy: Permite que el servicio Step Functions asuma este rol
+data "aws_iam_policy_document" "sfn_assume_role" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["states.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "step_functions_role" {
+  name               = "${local.project_name}_step_functions_role"
+  assume_role_policy = data.aws_iam_policy_document.sfn_assume_role.json
+
+  tags = {
+    Name    = "Step Functions Orchestrator Role"
+    Project = "LogiCash"
+  }
+}
+
+# --- IAM POLICY: Permisos de Glue para Step Functions ---
+# Permite iniciar/consultar Crawlers y Jobs desde la máquina de estados
+resource "aws_iam_role_policy" "sfn_glue_policy" {
+  name = "${local.project_name}_sfn_glue_policy"
+  role = aws_iam_role.step_functions_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:StartCrawler",
+          "glue:GetCrawler",
+          "glue:StartJobRun",
+          "glue:GetJobRun"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# --- STATE MACHINE ---
+# Flujo: StartCrawler → Wait 15s → GetCrawler → (RUNNING? loop) → StartJobRun (.sync)
+resource "aws_sfn_state_machine" "etl_pipeline" {
+  name     = "${local.project_name}_etl_pipeline"
+  role_arn = aws_iam_role.step_functions_role.arn
+
+  definition = jsonencode({
+    Comment = "LogiCash ETL Pipeline - Orquesta Crawler + Glue Job"
+    StartAt = "StartCrawler"
+    States = {
+
+      # Paso 1: Iniciar el Crawler para catalogar datos crudos en S3
+      StartCrawler = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:glue:startCrawler"
+        Parameters = {
+          Name = aws_glue_crawler.raw_crawler.name
+        }
+        ResultPath = null
+        Next       = "WaitForCrawler"
+      }
+
+      # Paso 2: Esperar 15 segundos antes de consultar el estado
+      WaitForCrawler = {
+        Type    = "Wait"
+        Seconds = 15
+        Next    = "GetCrawlerStatus"
+      }
+
+      # Paso 3: Consultar el estado actual del Crawler
+      GetCrawlerStatus = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:glue:getCrawler"
+        Parameters = {
+          Name = aws_glue_crawler.raw_crawler.name
+        }
+        ResultPath = "$.CrawlerResult"
+        Next       = "CheckCrawlerStatus"
+      }
+
+      # Paso 4: Evaluar si el Crawler terminó o sigue corriendo
+      CheckCrawlerStatus = {
+        Type = "Choice"
+        Choices = [
+          {
+            # Si está corriendo, volver a esperar
+            Variable     = "$.CrawlerResult.Crawler.State"
+            StringEquals = "RUNNING"
+            Next         = "WaitForCrawler"
+          },
+          {
+            # Si está deteniéndose, volver a esperar
+            Variable     = "$.CrawlerResult.Crawler.State"
+            StringEquals = "STOPPING"
+            Next         = "WaitForCrawler"
+          }
+        ]
+        # Default (READY): El Crawler terminó, continuar al Job ETL
+        Default = "RunETLJob"
+      }
+
+      # Paso 5: Ejecutar el Job ETL de forma sincrónica (.sync)
+      # La Step Function espera a que el Job termine antes de marcarse como exitosa
+      RunETLJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = aws_glue_job.etl_job.name
+        }
+        End = true
+      }
+    }
+  })
+
+  tags = {
+    Name    = "LogiCash ETL Pipeline"
+    Project = "LogiCash"
+  }
+}

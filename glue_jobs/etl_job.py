@@ -41,8 +41,9 @@ print("📁 Leyendo archivos CSV ...")
 
 try:
     # Rutas dinámicas construidas desde los argumentos del Job
-    df_atms_path = f"s3://{bucket_raw}/dim_atms.csv"
-    df_transactions_path = f"s3://{bucket_raw}/fact_transactions.csv"
+    # Los CSVs se encuentran dentro de data/raw/ (estructura generada por el script local)
+    df_atms_path = f"s3://{bucket_raw}/data/raw/dim_atms.csv"
+    df_transactions_path = f"s3://{bucket_raw}/data/raw/fact_transactions.csv"
     
     # Leemos Dimension ATMs
     df_atms = spark.read.format("csv") \

@@ -109,7 +109,9 @@ resource "aws_iam_role_policy" "glue_s3_access" {
           "${aws_s3_bucket.raw_bucket.arn}",
           "${aws_s3_bucket.raw_bucket.arn}/*",
           "${aws_s3_bucket.silver_bucket.arn}",
-          "${aws_s3_bucket.silver_bucket.arn}/*"
+          "${aws_s3_bucket.silver_bucket.arn}/*",
+          "${aws_s3_bucket.scripts_bucket.arn}",
+          "${aws_s3_bucket.scripts_bucket.arn}/*"
         ]
       }
     ]
@@ -143,6 +145,58 @@ resource "aws_glue_crawler" "raw_crawler" {
 
   tags = {
     Name    = "Raw Data Crawler"
+    Project = "LogiCash"
+  }
+}
+
+# ============================================================
+# 5. AWS GLUE - ETL JOB
+# ============================================================
+
+# --- SUBIR SCRIPT ETL A S3 ---
+# Sube el archivo local del ETL Job al bucket de scripts.
+# El etag con filemd5() detecta cambios en el archivo local para re-subirlo automáticamente.
+resource "aws_s3_object" "etl_script" {
+  bucket = aws_s3_bucket.scripts_bucket.id
+  key    = "scripts/etl_job.py"
+  source = "../glue_jobs/etl_job.py"
+  etag   = filemd5("../glue_jobs/etl_job.py")
+
+  tags = {
+    Name    = "ETL Job Script"
+    Project = "LogiCash"
+  }
+}
+
+# --- GLUE JOB ---
+# Job ETL que ejecuta la pipeline Bronze -> Silver usando PySpark.
+# Lee CSVs del bucket Raw, transforma y escribe Parquet al bucket Silver.
+resource "aws_glue_job" "etl_job" {
+  name     = "${local.project_name}_etl_job"
+  role_arn = aws_iam_role.glue_role.arn
+
+  command {
+    script_location = "s3://${aws_s3_bucket.scripts_bucket.bucket}/scripts/etl_job.py"
+    python_version  = "3"
+  }
+
+  glue_version      = "4.0"
+  number_of_workers = 2
+  worker_type       = "G.1X"
+
+  # Argumentos dinámicos que el script recibe via getResolvedOptions
+  # Estos reemplazan las rutas S3 hardcodeadas en el código
+  default_arguments = {
+    "--bucket_raw"       = aws_s3_bucket.raw_bucket.id
+    "--bucket_processed" = aws_s3_bucket.silver_bucket.id
+    "--job-language"     = "python"
+  }
+
+  # Depende explícitamente de que el script ya exista en S3
+  depends_on = [aws_s3_object.etl_script]
+
+  tags = {
+    Name    = "LogiCash ETL Job"
     Project = "LogiCash"
   }
 }

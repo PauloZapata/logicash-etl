@@ -1,9 +1,9 @@
 import pandas as pd
 from faker import Faker
 import random
-import os
 import uuid
 from datetime import datetime, timedelta
+from pathlib import Path
 
 def setup_seeds():
     """Configurar semillas para reproducibilidad"""
@@ -11,22 +11,52 @@ def setup_seeds():
     Faker.seed(42)
 
 def create_output_directory():
-    """Crear directorio de salida si no existe"""
-    output_dir = os.path.join('data', 'raw')
-    os.makedirs(output_dir, exist_ok=True)
+    """
+    Crear directorio de salida usando pathlib para compatibilidad multiplataforma.
+    Detecta la ubicación del script y crea la carpeta hermana ../data/raw
+    """
+    # Obtener la ruta del script actual
+    current_script_path = Path(__file__).parent
+    
+    # Navegar a la carpeta padre y luego a data/raw
+    output_dir = current_script_path.parent / 'data' / 'raw'
+    
+    # Crear directorio si no existe
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     return output_dir
+
+def generate_lima_coordinates():
+    """
+    Generar coordenadas aleatorias dentro del bounding box de Lima, Perú.
+    
+    Returns:
+        tuple: (latitud, longitud) dentro de Lima metropolitana
+    """
+    # Bounding box de Lima, Perú
+    # Latitud: -12.20 (sur) a -11.90 (norte)
+    # Longitud: -77.15 (oeste) a -76.90 (este)
+    
+    lat_min, lat_max = -12.20, -11.90
+    lon_min, lon_max = -77.15, -76.90
+    
+    # Generar coordenadas aleatorias con precisión de 6 decimales (~111m de precisión)
+    latitud = round(random.uniform(lat_min, lat_max), 6)
+    longitud = round(random.uniform(lon_min, lon_max), 6)
+    
+    return latitud, longitud
 
 def generate_dim_atms(num_records=50):
     """
-    Generar tabla de dimensión de ATMs
+    Generar tabla de dimensión de ATMs con georreferenciación para Lima, Perú
     
     Args:
         num_records (int): Número de registros a generar (default: 50)
     
     Returns:
-        pd.DataFrame: DataFrame con datos de ATMs
+        pd.DataFrame: DataFrame con datos de ATMs incluyendo coordenadas y estado
     """
-    fake = Faker('es_ES')  # Usar localización española
+    fake = Faker('es')  # Localización español genérico (es_PE no existe en Faker)
     
     atms_data = []
     
@@ -34,20 +64,32 @@ def generate_dim_atms(num_records=50):
         # ID secuencial con formato ATM-XXX
         id_atm = f"ATM-{i:03d}"
         
-        # Generar dirección realista
-        ubicacion = f"{fake.street_address()}, {fake.city()}, {fake.state()}"
+        # Generar dirección realista en Lima
+        ubicacion = f"{fake.street_address()}, {fake.city_suffix()} {fake.city()}, Lima"
+        
+        # Generar coordenadas dentro del bounding box de Lima
+        latitud, longitud = generate_lima_coordinates()
         
         # Capacidad máxima aleatoria
         capacidad_maxima = random.choice([100000, 500000, 1000000])
         
         # Modelo aleatorio
-        modelo = random.choice(['NCR', 'Diebold', 'Hyosung'])
+        modelo = random.choice(['NCR', 'Diebold', 'Hyosung', 'Wincor Nixdorf'])
+        
+        # Estado del cajero con probabilidades ponderadas
+        estado = random.choices(
+            ['OPERATIVO', 'MANTENIMIENTO', 'FUERA_DE_SERVICIO'],
+            weights=[92, 5, 3]  # 92% operativo, 5% mantenimiento, 3% fuera de servicio
+        )[0]
         
         atms_data.append({
             'id_atm': id_atm,
             'ubicacion': ubicacion,
+            'latitud': latitud,
+            'longitud': longitud,
             'capacidad_maxima': capacidad_maxima,
-            'modelo': modelo
+            'modelo': modelo,
+            'estado': estado
         })
     
     return pd.DataFrame(atms_data)
@@ -92,7 +134,7 @@ def generate_fact_transactions(atm_ids, num_records=10000):
             # Fecha normal en el rango correcto
             fecha = fake.date_time_between(start_date=start_date, end_date=end_date)
         
-        # Monto de la transacción
+        # Monto de la transacción - SIEMPRE con 2 decimales
         if random.random() < 0.02:  # 2% probabilidad de monto negativo (error de negocio)
             monto = round(random.uniform(-8000.00, -10.00), 2)
         else:
@@ -123,14 +165,14 @@ def generate_fact_transactions(atm_ids, num_records=10000):
 
 def save_to_csv(df, filename, output_dir):
     """
-    Guardar DataFrame a CSV
+    Guardar DataFrame a CSV usando pathlib
     
     Args:
         df (pd.DataFrame): DataFrame a guardar
         filename (str): Nombre del archivo
-        output_dir (str): Directorio de salida
+        output_dir (Path): Directorio de salida (objeto Path)
     """
-    filepath = os.path.join(output_dir, filename)
+    filepath = output_dir / filename
     df.to_csv(filepath, index=False, encoding='utf-8')
     print(f"✅ Archivo generado: {filepath}")
     print(f"   📊 Registros: {len(df):,}")
@@ -154,6 +196,16 @@ def generate_data_quality_report(dim_atms_df, fact_transactions_df):
     print(f"   Distribución de modelos:")
     for modelo, count in dim_atms_df['modelo'].value_counts().items():
         print(f"     - {modelo}: {count} ({count/len(dim_atms_df)*100:.1f}%)")
+    
+    # Distribución de estados de ATMs
+    print(f"   Estado de cajeros:")
+    for estado, count in dim_atms_df['estado'].value_counts().items():
+        print(f"     - {estado}: {count} ({count/len(dim_atms_df)*100:.1f}%)")
+    
+    # Estadísticas geoespaciales
+    print(f"   📍 Coordenadas (Lima, Perú):")
+    print(f"     - Latitud: {dim_atms_df['latitud'].min():.6f} a {dim_atms_df['latitud'].max():.6f}")
+    print(f"     - Longitud: {dim_atms_df['longitud'].min():.6f} a {dim_atms_df['longitud'].max():.6f}")
     print()
     
     # Estadísticas de fact_transactions
@@ -191,8 +243,8 @@ def generate_data_quality_report(dim_atms_df, fact_transactions_df):
 
 def main():
     """Función principal para generar todos los datos"""
-    print("🚀 GENERADOR DE DATOS MOCK - PROYECTO ETL BANCARIO")
-    print("=" * 55)
+    print("🚀 GENERADOR DE DATOS MOCK - ANALÍTICA GEOESPACIAL ATMs LIMA")
+    print("=" * 60)
     print()
     
     # Configurar semillas para reproducibilidad
@@ -204,8 +256,8 @@ def main():
     print(f"📁 Directorio de salida: {output_dir}")
     print()
     
-    # Generar dimensión de ATMs
-    print("🏧 Generando dimensión de ATMs...")
+    # Generar dimensión de ATMs con georreferenciación
+    print("🏧 Generando dimensión de ATMs (Lima, Perú)...")
     dim_atms_df = generate_dim_atms(num_records=50)
     save_to_csv(dim_atms_df, 'dim_atms.csv', output_dir)
     
@@ -221,7 +273,8 @@ def main():
     generate_data_quality_report(dim_atms_df, fact_transactions_df)
     
     print("\n✨ Generación de datos completada exitosamente!")
-    print("📂 Archivos generados en:", os.path.abspath(output_dir))
+    print(f"📂 Archivos generados en: {output_dir.resolve()}")
+    print("🗺️  Listo para análisis geoespacial con coordenadas de Lima, Perú")
 
 if __name__ == "__main__":
     main()

@@ -17,18 +17,32 @@ sc = SparkContext()
 # 2. GlueContext: Envoltura de AWS para "superpoderes" de datos.
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
-job = Job(glueContext)
-job.init("logicash_etl_job", {})
 
-print("✅ Entorno Spark/Glue inicializado correctamente.")
+# 3. Capturar argumentos dinámicos del Job de Glue
+# Estos valores se configuran en la consola de AWS Glue al crear/ejecutar el Job
+# --JOB_NAME: Nombre del job (requerido por Glue)
+# --bucket_raw: Nombre del bucket S3 de datos crudos (Bronze)
+# --bucket_processed: Nombre del bucket S3 de datos procesados (Silver)
+args = getResolvedOptions(sys.argv, ['JOB_NAME', 'bucket_raw', 'bucket_processed'])
+
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Extraer argumentos en variables legibles
+bucket_raw = args['bucket_raw']
+bucket_processed = args['bucket_processed']
+
+print(f"✅ Entorno Spark/Glue inicializado correctamente.")
+print(f"📦 Bucket Raw: s3://{bucket_raw}")
+print(f"📦 Bucket Processed: s3://{bucket_processed}")
 
 # --- PARTE B: EXTRACT (Lectura de fuentes) ---
 print("📁 Leyendo archivos CSV ...")
 
 try:
-    # Definimos las rutas para mejor manejo de errores
-    df_atms_path = "s3://logicash-raw-paulozapata/dim_atms.csv"
-    df_transactions_path = "s3://logicash-raw-paulozapata/fact_transactions.csv"
+    # Rutas dinámicas construidas desde los argumentos del Job
+    df_atms_path = f"s3://{bucket_raw}/dim_atms.csv"
+    df_transactions_path = f"s3://{bucket_raw}/fact_transactions.csv"
     
     # Leemos Dimension ATMs
     df_atms = spark.read.format("csv") \
@@ -99,8 +113,8 @@ df_clean.select("id_transaccion", "fecha_dia", "monto", "ubicacion").show(5, tru
 # --- 4. LOAD (Escribir en Formato Big Data) ---
 print("\n💾 Guardando datos en formato Parquet...")
 
-# Ruta de salida
-output_path = "s3://logicash-processed-paulozapata/fact_transactions"
+# Ruta de salida dinámica desde argumentos del Job
+output_path = f"s3://{bucket_processed}/fact_transactions"
 
 try:
     # AQUI ESTÁ LA CORRECCIÓN CLAVE:
@@ -161,4 +175,7 @@ spark.sql(daily_summary_query).show(truncate=False)
 
 print("\n✅ Validaciones automáticas completadas.")
 
+# --- COMMIT DEL JOB ---
+# Señaliza a Glue que el job terminó exitosamente (requerido para bookmarks y métricas)
+job.commit()
 print("--- Job Finalizado Exitosamente ---")

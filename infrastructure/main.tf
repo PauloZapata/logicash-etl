@@ -187,9 +187,11 @@ resource "aws_glue_job" "etl_job" {
   # Argumentos dinámicos que el script recibe via getResolvedOptions
   # Estos reemplazan las rutas S3 hardcodeadas en el código
   default_arguments = {
-    "--bucket_raw"       = aws_s3_bucket.raw_bucket.id
-    "--bucket_processed" = aws_s3_bucket.silver_bucket.id
-    "--job-language"     = "python"
+    "--bucket_raw"                          = aws_s3_bucket.raw_bucket.id
+    "--bucket_processed"                    = aws_s3_bucket.silver_bucket.id
+    "--job-language"                        = "python"
+    "--enable-continuous-cloudwatch-log"     = "true"
+    "--enable-cloudwatch-log-level"          = "INFO"
   }
 
   # Depende explícitamente de que el script ya exista en S3

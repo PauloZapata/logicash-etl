@@ -73,6 +73,21 @@ df_joined = df_transactions.join(broadcast(df_atms), on="id_atm", how="left")
 # Reglas: id_atm no nulo, monto > 0, fecha pasada, status EXITOSA
 count_raw = df_joined.count()
 
+# --- DESGLOSE DE DESCARTE POR REGLA (Observabilidad) ---
+# Conteo individual ANTES de aplicar el filtro combinado
+# Permite detectar anomalías en la fuente de datos (ej: pico de montos negativos)
+null_atm = df_joined.filter(col("id_atm").isNull()).count()
+negative_amount = df_joined.filter(col("monto") <= 0).count()
+future_dates = df_joined.filter(col("fecha") > current_timestamp()).count()
+non_successful = df_joined.filter(col("status_transaccion") != 'EXITOSA').count()
+
+print(f"\n   🔍 Desglose de Descarte por Regla:")
+print(f"      - id_atm nulo:          {null_atm} registros ({null_atm/count_raw*100:.2f}%)")
+print(f"      - monto <= 0:           {negative_amount} registros ({negative_amount/count_raw*100:.2f}%)")
+print(f"      - fecha futura:         {future_dates} registros ({future_dates/count_raw*100:.2f}%)")
+print(f"      - status no exitosa:    {non_successful} registros ({non_successful/count_raw*100:.2f}%)")
+
+# Aplicar filtro combinado (un registro puede fallar en múltiples reglas)
 df_clean = df_joined.filter(
     (col("id_atm").isNotNull()) & 
     (col("monto") > 0) & 

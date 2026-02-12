@@ -335,3 +335,222 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
     Project = "LogiCash"
   }
 }
+
+# ============================================================
+# 7. REDSHIFT SERVERLESS - DATA WAREHOUSING
+# ============================================================
+# Capa analítica para consultas SQL sobre datos procesados (Silver/Parquet).
+# Optimizado para Free Trial de AWS ($300 créditos).
+
+# --- 7.1 NETWORKING (VPC, Subnets, Internet Gateway) ---
+
+# VPC dedicada para Redshift Serverless
+resource "aws_vpc" "logicash_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name    = "${local.project_name}_vpc"
+    Project = "LogiCash"
+  }
+}
+
+# Internet Gateway para acceso público desde PC local
+resource "aws_internet_gateway" "logicash_igw" {
+  vpc_id = aws_vpc.logicash_vpc.id
+
+  tags = {
+    Name    = "${local.project_name}_igw"
+    Project = "LogiCash"
+  }
+}
+
+# Route Table con ruta a Internet
+resource "aws_route_table" "logicash_rt" {
+  vpc_id = aws_vpc.logicash_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.logicash_igw.id
+  }
+
+  tags = {
+    Name    = "${local.project_name}_route_table"
+    Project = "LogiCash"
+  }
+}
+
+# 3 Subnets Públicas en 3 AZs diferentes (requerido por Redshift Serverless para HA)
+resource "aws_subnet" "logicash_subnet_a" {
+  vpc_id                  = aws_vpc.logicash_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name    = "${local.project_name}_subnet_a"
+    Project = "LogiCash"
+  }
+}
+
+resource "aws_subnet" "logicash_subnet_b" {
+  vpc_id                  = aws_vpc.logicash_vpc.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name    = "${local.project_name}_subnet_b"
+    Project = "LogiCash"
+  }
+}
+
+resource "aws_subnet" "logicash_subnet_c" {
+  vpc_id                  = aws_vpc.logicash_vpc.id
+  cidr_block              = "10.0.3.0/24"
+  availability_zone       = "us-east-1c"
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name    = "${local.project_name}_subnet_c"
+    Project = "LogiCash"
+  }
+}
+
+# Asociar las 3 subnets a la Route Table pública
+resource "aws_route_table_association" "rta_a" {
+  subnet_id      = aws_subnet.logicash_subnet_a.id
+  route_table_id = aws_route_table.logicash_rt.id
+}
+
+resource "aws_route_table_association" "rta_b" {
+  subnet_id      = aws_subnet.logicash_subnet_b.id
+  route_table_id = aws_route_table.logicash_rt.id
+}
+
+resource "aws_route_table_association" "rta_c" {
+  subnet_id      = aws_subnet.logicash_subnet_c.id
+  route_table_id = aws_route_table.logicash_rt.id
+}
+
+# Security Group para Redshift Serverless
+# Puerto 5439 abierto a 0.0.0.0/0 (solo entorno educativo, NO para producción)
+resource "aws_security_group" "redshift_sg" {
+  name        = "${local.project_name}_redshift_sg"
+  description = "Security Group para Redshift Serverless - Entorno educativo"
+  vpc_id      = aws_vpc.logicash_vpc.id
+
+  # Ingress: Puerto 5439 (Redshift) desde cualquier IP
+  ingress {
+    description = "Redshift access from anywhere (educational only)"
+    from_port   = 5439
+    to_port     = 5439
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Egress: Salida sin restricciones
+  egress {
+    description = "Allow all outbound traffic"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name    = "${local.project_name}_redshift_sg"
+    Project = "LogiCash"
+  }
+}
+
+# --- 7.2 IAM ROLE PARA REDSHIFT SERVERLESS ---
+# Permite a Redshift leer datos desde S3 (COPY command)
+
+data "aws_iam_policy_document" "redshift_assume_role" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["redshift.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "redshift_serverless_role" {
+  name               = "${local.project_name}_redshift_serverless_role"
+  assume_role_policy = data.aws_iam_policy_document.redshift_assume_role.json
+
+  tags = {
+    Name    = "Redshift Serverless Role"
+    Project = "LogiCash"
+  }
+}
+
+# Política S3 ReadOnly para ejecutar COPY desde el bucket Silver
+resource "aws_iam_role_policy_attachment" "redshift_s3_read" {
+  role       = aws_iam_role.redshift_serverless_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+}
+
+# --- 7.3 REDSHIFT SERVERLESS (Namespace + Workgroup) ---
+
+# Namespace: Contenedor lógico de la base de datos y configuración
+resource "aws_redshiftserverless_namespace" "logicash_namespace" {
+  namespace_name = "${local.project_name}-namespace"
+  db_name        = "dev"
+  iam_roles      = [aws_iam_role.redshift_serverless_role.arn]
+
+  tags = {
+    Name    = "LogiCash Redshift Namespace"
+    Project = "LogiCash"
+  }
+}
+
+# Workgroup: Compute layer con capacidad mínima para Free Trial
+resource "aws_redshiftserverless_workgroup" "logicash_workgroup" {
+  workgroup_name = "${local.project_name}-workgroup"
+  namespace_name = aws_redshiftserverless_namespace.logicash_namespace.namespace_name
+
+  # CRÍTICO: 8 RPU es el mínimo para Free Trial ($300 créditos)
+  base_capacity = 8
+
+  # Subnets en 3 AZs (requerido por Redshift Serverless para HA)
+  subnet_ids = [
+    aws_subnet.logicash_subnet_a.id,
+    aws_subnet.logicash_subnet_b.id,
+    aws_subnet.logicash_subnet_c.id
+  ]
+
+  security_group_ids  = [aws_security_group.redshift_sg.id]
+  publicly_accessible = true
+
+  tags = {
+    Name    = "LogiCash Redshift Workgroup"
+    Project = "LogiCash"
+  }
+}
+
+# --- 7.4 CONTROL DE COSTOS (Usage Limit) ---
+# Limita el consumo diario de RPU-hours para proteger los créditos del Free Trial
+resource "aws_redshiftserverless_usage_limit" "compute_limit" {
+  resource_arn  = aws_redshiftserverless_workgroup.logicash_workgroup.arn
+  usage_type    = "serverless-compute"
+  amount        = 60
+  period        = "daily"
+  breach_action = "log"
+}
+
+# --- 7.5 OUTPUTS ---
+
+output "redshift_endpoint" {
+  description = "Endpoint de conexión para Redshift Serverless"
+  value       = aws_redshiftserverless_workgroup.logicash_workgroup.endpoint
+}
+
+output "redshift_workgroup_name" {
+  description = "Nombre del workgroup para conexión"
+  value       = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
+}

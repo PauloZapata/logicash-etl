@@ -4,6 +4,7 @@ import random
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
+from decimal import Decimal
 
 def setup_seeds():
     """Configurar semillas para reproducibilidad"""
@@ -134,11 +135,13 @@ def generate_fact_transactions(atm_ids, num_records=10000):
             # Fecha normal en el rango correcto
             fecha = fake.date_time_between(start_date=start_date, end_date=end_date)
         
-        # Monto de la transacción - SIEMPRE con 2 decimales
+        # Monto de la transacción - Precisión financiera con Decimal
+        # Usa aritmética entera + Decimal para evitar errores de punto flotante IEEE 754
+        # Genera un entero entre 1000 y 800000 y lo divide entre 100 → rango: 10.00 a 8000.00
         if random.random() < 0.02:  # 2% probabilidad de monto negativo (error de negocio)
-            monto = round(random.uniform(-8000.00, -10.00), 2)
+            monto = -(Decimal(random.randint(1000, 800000)) / 100)
         else:
-            monto = round(random.uniform(10.00, 8000.00), 2)
+            monto = Decimal(random.randint(1000, 800000)) / 100
         
         # Tipo de movimiento con probabilidades especificadas
         tipo_movimiento = random.choices(

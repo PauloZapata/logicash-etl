@@ -39,34 +39,27 @@ print(f"📦 Bucket Processed: s3://{bucket_processed}")
 # --- PARTE B: EXTRACT (Lectura de fuentes) ---
 print("📁 Leyendo archivos CSV ...")
 
-try:
-    # Rutas dinámicas construidas desde los argumentos del Job
-    # Los CSVs se encuentran en la raíz del bucket raw
-    df_atms_path = f"s3://{bucket_raw}/dim_atms.csv"
-    df_transactions_path = f"s3://{bucket_raw}/fact_transactions.csv"
-    
-    # Leemos Dimension ATMs
-    df_atms = spark.read.format("csv") \
-        .option("header", "true") \
-        .option("inferSchema", "true") \
-        .option("delimiter", ",") \
-        .load(df_atms_path)
-    
-    # Leemos Fact Transactions
-    df_transactions = spark.read.format("csv") \
-        .option("header", "true") \
-        .option("inferSchema", "true") \
-        .option("delimiter", ",") \
-        .load(df_transactions_path)
-    
-    print(f" -> ATMs cargados: {df_atms.count()} registros")
-    print(f" -> Transactions cargados: {df_transactions.count()} registros")
+# Rutas dinámicas construidas desde los argumentos del Job
+# Los CSVs se encuentran en la raíz del bucket raw
+df_atms_path = f"s3://{bucket_raw}/dim_atms.csv"
+df_transactions_path = f"s3://{bucket_raw}/fact_transactions.csv"
 
-except Exception as e:
-    print(f"❌ Error leyendo archivos CSV: {str(e)}")
-    print(f"📁 Verificar que existan: {df_atms_path}, {df_transactions_path}")
-    # Log para CloudWatch en producción
-    sys.exit(1)
+# Leemos Dimension ATMs
+df_atms = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .option("delimiter", ",") \
+    .load(df_atms_path)
+
+# Leemos Fact Transactions
+df_transactions = spark.read.format("csv") \
+    .option("header", "true") \
+    .option("inferSchema", "true") \
+    .option("delimiter", ",") \
+    .load(df_transactions_path)
+
+print(f" -> ATMs cargados: {df_atms.count()} registros")
+print(f" -> Transactions cargados: {df_transactions.count()} registros")
 
 # --- 3. TRANSFORM (Limpieza y Enriquecimiento) ---
 print("🧹 Iniciando Transformación...")
@@ -117,21 +110,12 @@ print("\n💾 Guardando datos en formato Parquet...")
 # Ruta de salida dinámica desde argumentos del Job
 output_path = f"s3://{bucket_processed}/fact_transactions"
 
-try:
-    # AQUI ESTÁ LA CORRECCIÓN CLAVE:
-    # Usamos .partitionBy("fecha_dia") en lugar de "fecha".
-    # Esto creará una carpeta por día, no por segundo.
-    df_clean.write.mode("overwrite") \
-        .partitionBy("fecha_dia") \
-        .parquet(output_path)
-    
-    print(f"✅ Data guardada exitosamente en: {output_path}")
+# Escritura en Parquet particionado por fecha_dia (una carpeta por día, no por segundo)
+df_clean.write.mode("overwrite") \
+    .partitionBy("fecha_dia") \
+    .parquet(output_path)
 
-except Exception as e:
-    print(f"❌ Error guardando data: {str(e)}")
-    print(f"📁 Verificar permisos de escritura en: {output_path}")
-    print(f"💡 Tip: En S3 verificar que el bucket exista y tenga permisos correctos")
-    sys.exit(1)
+print(f"✅ Data guardada exitosamente en: {output_path}")
 
 print("--- Job Finalizado Exitosamente ---")
 

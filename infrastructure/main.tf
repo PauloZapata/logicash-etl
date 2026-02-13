@@ -309,13 +309,15 @@ resource "aws_iam_role_policy" "sfn_glue_policy" {
         Resource = "*"
       },
       {
-        # Permiso para que Redshift Data API obtenga credenciales del namespace
+        # Permiso para que Redshift Data API obtenga credenciales
+        # Requiere acceso tanto al Namespace como al Workgroup
         Effect = "Allow"
         Action = [
           "redshift-serverless:GetCredentials"
         ]
         Resource = [
-          aws_redshiftserverless_namespace.logicash_namespace.arn
+          aws_redshiftserverless_namespace.logicash_namespace.arn,
+          aws_redshiftserverless_workgroup.logicash_workgroup.arn
         ]
       }
     ]

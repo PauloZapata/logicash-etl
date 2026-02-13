@@ -39,10 +39,11 @@ print(f"📦 Bucket Processed: s3://{bucket_processed}")
 # --- PARTE B: EXTRACT (Lectura de fuentes) ---
 print("📁 Leyendo archivos CSV ...")
 
-# Rutas dinámicas construidas desde los argumentos del Job
-# Los CSVs se encuentran en la raíz del bucket raw
-df_atms_path = f"s3://{bucket_raw}/dim_atms.csv"
-df_transactions_path = f"s3://{bucket_raw}/fact_transactions.csv"
+# Rutas dinámicas apuntando a CARPETAS (no archivos individuales)
+# Spark lee automáticamente todos los CSVs dentro de cada carpeta
+# Esto soporta cargas incrementales: múltiples archivos con timestamp en el nombre
+df_atms_path = f"s3://{bucket_raw}/dim_atms/"
+df_transactions_path = f"s3://{bucket_raw}/fact_transactions/"
 
 # Leemos Dimension ATMs
 df_atms = spark.read.format("csv") \

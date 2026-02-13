@@ -22,6 +22,29 @@ resource "aws_s3_bucket" "raw_bucket" {
   }
 }
 
+# Habilitar notificaciones de EventBridge en el bucket Raw
+# Necesario para que EventBridge detecte la creación del archivo _READY
+resource "aws_s3_bucket_notification" "raw_bucket_notification" {
+  bucket      = aws_s3_bucket.raw_bucket.id
+  eventbridge = true
+}
+
+# --- S3 PLACEHOLDERS (Carpetas virtuales para estructura incremental) ---
+# S3 no tiene carpetas reales; estos objetos vacíos crean la estructura esperada
+# para que el Crawler y Spark encuentren las rutas correctas.
+
+resource "aws_s3_object" "folder_dim_atms" {
+  bucket  = aws_s3_bucket.raw_bucket.id
+  key     = "dim_atms/"
+  content = ""
+}
+
+resource "aws_s3_object" "folder_fact_transactions" {
+  bucket  = aws_s3_bucket.raw_bucket.id
+  key     = "fact_transactions/"
+  content = ""
+}
+
 # Bucket para Datos Limpios (Silver)
 resource "aws_s3_bucket" "silver_bucket" {
   bucket = "${local.project_name}-silver-${local.suffix}"
@@ -135,8 +158,13 @@ resource "aws_glue_crawler" "raw_crawler" {
   database_name = aws_glue_catalog_database.logicash_db.name
   description   = "Crawler que cataloga los datos crudos del bucket Bronze/Raw"
 
+  # Crawlear cada subcarpeta por separado para que Glue cree una tabla por cada una
   s3_target {
-    path = "s3://${aws_s3_bucket.raw_bucket.bucket}"
+    path = "s3://${aws_s3_bucket.raw_bucket.bucket}/dim_atms/"
+  }
+
+  s3_target {
+    path = "s3://${aws_s3_bucket.raw_bucket.bucket}/fact_transactions/"
   }
 
   schema_change_policy {
@@ -233,8 +261,26 @@ resource "aws_iam_role" "step_functions_role" {
   }
 }
 
-# --- IAM POLICY: Permisos de Glue para Step Functions ---
-# Permite iniciar/consultar Crawlers y Jobs desde la máquina de estados
+# --- IAM POLICY: S3 Delete para eliminar _READY trigger ---
+# Permite a Step Functions borrar el archivo flag al inicio del pipeline
+resource "aws_iam_role_policy" "sfn_s3_delete_policy" {
+  name = "${local.project_name}_sfn_s3_delete_policy"
+  role = aws_iam_role.step_functions_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:DeleteObject"]
+        Resource = ["${aws_s3_bucket.raw_bucket.arn}/_READY"]
+      }
+    ]
+  })
+}
+
+# --- IAM POLICY: Permisos de Glue + Redshift Data API para Step Functions ---
+# Permite iniciar/consultar Crawlers, Jobs y ejecutar SQL en Redshift Serverless
 resource "aws_iam_role_policy" "sfn_glue_policy" {
   name = "${local.project_name}_sfn_glue_policy"
   role = aws_iam_role.step_functions_role.id
@@ -251,21 +297,55 @@ resource "aws_iam_role_policy" "sfn_glue_policy" {
           "glue:GetJobRun"
         ]
         Resource = "*"
+      },
+      {
+        # Permisos para Redshift Data API (ejecutar SQL desde Step Functions)
+        Effect = "Allow"
+        Action = [
+          "redshift-data:ExecuteStatement",
+          "redshift-data:DescribeStatement",
+          "redshift-data:GetStatementResult"
+        ]
+        Resource = "*"
+      },
+      {
+        # Permiso para que Redshift Data API obtenga credenciales del namespace
+        Effect = "Allow"
+        Action = [
+          "redshift-serverless:GetCredentials"
+        ]
+        Resource = [
+          aws_redshiftserverless_namespace.logicash_namespace.arn
+        ]
       }
     ]
   })
 }
 
 # --- STATE MACHINE ---
-# Flujo: StartCrawler → Wait 15s → GetCrawler → (RUNNING? loop) → StartJobRun (.sync)
+# Flujo completo: DeleteTrigger → Crawler → polling → ETL Job → Redshift SQL
+# El trigger _READY se elimina al inicio para evitar re-ejecuciones accidentales
 resource "aws_sfn_state_machine" "etl_pipeline" {
   name     = "${local.project_name}_etl_pipeline"
   role_arn = aws_iam_role.step_functions_role.arn
 
   definition = jsonencode({
-    Comment = "LogiCash ETL Pipeline - Orquesta Crawler + Glue Job"
-    StartAt = "StartCrawler"
+    Comment = "LogiCash ETL Pipeline - Crawler + Glue Job + Redshift SQL"
+    StartAt = "DeleteTriggerFile"
     States = {
+
+      # Paso 0: Eliminar el archivo _READY para evitar re-disparos
+      # CRÍTICO: Se ejecuta PRIMERO para garantizar idempotencia del trigger
+      DeleteTriggerFile = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:s3:deleteObject"
+        Parameters = {
+          Bucket = aws_s3_bucket.raw_bucket.id
+          Key    = "_READY"
+        }
+        ResultPath = null
+        Next       = "StartCrawler"
+      }
 
       # Paso 1: Iniciar el Crawler para catalogar datos crudos en S3
       StartCrawler = {
@@ -301,31 +381,111 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Type = "Choice"
         Choices = [
           {
-            # Si está corriendo, volver a esperar
             Variable     = "$.CrawlerResult.Crawler.State"
             StringEquals = "RUNNING"
             Next         = "WaitForCrawler"
           },
           {
-            # Si está deteniéndose, volver a esperar
             Variable     = "$.CrawlerResult.Crawler.State"
             StringEquals = "STOPPING"
             Next         = "WaitForCrawler"
           }
         ]
-        # Default (READY): El Crawler terminó, continuar al Job ETL
         Default = "RunETLJob"
       }
 
       # Paso 5: Ejecutar el Job ETL de forma sincrónica (.sync)
-      # La Step Function espera a que el Job termine antes de marcarse como exitosa
       RunETLJob = {
         Type     = "Task"
         Resource = "arn:aws:states:::glue:startJobRun.sync"
         Parameters = {
           JobName = aws_glue_job.etl_job.name
         }
-        End = true
+        ResultPath = null
+        Next       = "RunRedshiftSQL"
+      }
+
+      # Paso 6: Cargar datos Silver a Redshift Serverless
+      # SQL leído desde archivos locales para Single Source of Truth:
+      #   - sql/ddl_staging.sql → templatefile() (inyecta bucket y role ARN)
+      #   - sql/ddl_gold.sql   → file() (SQL puro, sin variables)
+      # Terraform concatena ambos en un solo bloque SQL en tiempo de plan.
+      RunRedshiftSQL = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:redshiftdata:executeStatement"
+        Parameters = {
+          WorkgroupName = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
+          Database      = "dev"
+          Sql           = "${templatefile("../sql/ddl_staging.sql", { silver_bucket = aws_s3_bucket.silver_bucket.bucket, redshift_role_arn = aws_iam_role.redshift_serverless_role.arn })}\n${file("../sql/ddl_gold.sql")}"
+        }
+        ResultPath = "$.RedshiftResult"
+        Next       = "WaitForRedshift"
+      }
+
+      # Paso 7: Esperar a que el SQL de Redshift termine (polling asíncrono)
+      WaitForRedshift = {
+        Type    = "Wait"
+        Seconds = 10
+        Next    = "GetRedshiftStatus"
+      }
+
+      # Paso 8: Consultar el estado de la ejecución SQL
+      GetRedshiftStatus = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::aws-sdk:redshiftdata:describeStatement"
+        Parameters = {
+          "Id.$" = "$.RedshiftResult.Id"
+        }
+        ResultPath = "$.RedshiftStatus"
+        Next       = "CheckRedshiftStatus"
+      }
+
+      # Paso 9: Evaluar si el SQL terminó, sigue corriendo o falló
+      CheckRedshiftStatus = {
+        Type = "Choice"
+        Choices = [
+          {
+            # SQL aún ejecutándose → seguir esperando
+            Variable     = "$.RedshiftStatus.Status"
+            StringEquals = "STARTED"
+            Next         = "WaitForRedshift"
+          },
+          {
+            Variable     = "$.RedshiftStatus.Status"
+            StringEquals = "SUBMITTED"
+            Next         = "WaitForRedshift"
+          },
+          {
+            Variable     = "$.RedshiftStatus.Status"
+            StringEquals = "PICKED"
+            Next         = "WaitForRedshift"
+          },
+          {
+            # SQL terminó exitosamente
+            Variable     = "$.RedshiftStatus.Status"
+            StringEquals = "FINISHED"
+            Next         = "PipelineSuccess"
+          },
+          {
+            # SQL falló
+            Variable     = "$.RedshiftStatus.Status"
+            StringEquals = "FAILED"
+            Next         = "RedshiftFailed"
+          }
+        ]
+        Default = "WaitForRedshift"
+      }
+
+      # Paso 10: Pipeline completado exitosamente
+      PipelineSuccess = {
+        Type = "Succeed"
+      }
+
+      # Paso 11: Redshift SQL falló
+      RedshiftFailed = {
+        Type  = "Fail"
+        Error = "RedshiftSQLFailed"
+        Cause = "La ejecución SQL en Redshift Serverless falló. Revisar CloudWatch logs."
       }
     }
   })
@@ -553,4 +713,84 @@ output "redshift_endpoint" {
 output "redshift_workgroup_name" {
   description = "Nombre del workgroup para conexión"
   value       = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
+}
+
+# ============================================================
+# 8. EVENTBRIDGE - TRIGGER AUTOMÁTICO POR FLAG FILE
+# ============================================================
+# Detecta la creación del archivo _READY en el bucket Raw para disparar
+# la Step Function. Evita condiciones de carrera: el pipeline SOLO arranca
+# cuando todos los CSVs del lote ya fueron subidos.
+
+# --- REGLA DE EVENTBRIDGE ---
+# Filtra eventos S3 Object Created con key exacta "_READY"
+# NO se dispara con archivos .csv individuales
+resource "aws_cloudwatch_event_rule" "s3_ready_trigger" {
+  name        = "${local.project_name}_s3_ready_trigger"
+  description = "Dispara el pipeline ETL cuando se detecta el archivo _READY en el bucket Raw"
+
+  event_pattern = jsonencode({
+    source      = ["aws.s3"]
+    detail-type = ["Object Created"]
+    detail = {
+      bucket = {
+        name = [aws_s3_bucket.raw_bucket.id]
+      }
+      object = {
+        key = ["_READY"]
+      }
+    }
+  })
+
+  tags = {
+    Name    = "S3 Ready File Trigger"
+    Project = "LogiCash"
+  }
+}
+
+# --- TARGET: Step Functions ---
+# Conecta la regla de EventBridge con la State Machine
+resource "aws_cloudwatch_event_target" "trigger_step_function" {
+  rule     = aws_cloudwatch_event_rule.s3_ready_trigger.name
+  arn      = aws_sfn_state_machine.etl_pipeline.arn
+  role_arn = aws_iam_role.eventbridge_sfn_role.arn
+}
+
+# --- IAM ROLE PARA EVENTBRIDGE ---
+# Permite a EventBridge iniciar ejecuciones de la Step Function
+data "aws_iam_policy_document" "eventbridge_assume_role" {
+  statement {
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+    actions = ["sts:AssumeRole"]
+  }
+}
+
+resource "aws_iam_role" "eventbridge_sfn_role" {
+  name               = "${local.project_name}_eventbridge_sfn_role"
+  assume_role_policy = data.aws_iam_policy_document.eventbridge_assume_role.json
+
+  tags = {
+    Name    = "EventBridge to Step Functions Role"
+    Project = "LogiCash"
+  }
+}
+
+resource "aws_iam_role_policy" "eventbridge_sfn_policy" {
+  name = "${local.project_name}_eventbridge_sfn_policy"
+  role = aws_iam_role.eventbridge_sfn_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["states:StartExecution"]
+        Resource = [aws_sfn_state_machine.etl_pipeline.arn]
+      }
+    ]
+  })
 }

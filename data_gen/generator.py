@@ -11,21 +11,29 @@ def setup_seeds():
     random.seed(42)
     Faker.seed(42)
 
-def create_output_directory():
+def create_output_directories():
     """
-    Crear directorio de salida usando pathlib para compatibilidad multiplataforma.
-    Detecta la ubicación del script y crea la carpeta hermana ../data/raw
+    Crear directorios de salida para carga incremental usando pathlib.
+    Estructura:
+        data/raw/dim_atms/          → CSVs de dimensión ATMs
+        data/raw/fact_transactions/ → CSVs de transacciones (con timestamp)
+    
+    Returns:
+        tuple: (dir_atms, dir_transactions, dir_raw) como objetos Path
     """
     # Obtener la ruta del script actual
     current_script_path = Path(__file__).parent
     
-    # Navegar a la carpeta padre y luego a data/raw
-    output_dir = current_script_path.parent / 'data' / 'raw'
+    # Navegar a la carpeta padre y luego a data/raw/<subcarpeta>
+    base_raw = current_script_path.parent / 'data' / 'raw'
+    dir_atms = base_raw / 'dim_atms'
+    dir_transactions = base_raw / 'fact_transactions'
     
-    # Crear directorio si no existe
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Crear directorios si no existen
+    dir_atms.mkdir(parents=True, exist_ok=True)
+    dir_transactions.mkdir(parents=True, exist_ok=True)
     
-    return output_dir
+    return dir_atms, dir_transactions, base_raw
 
 def generate_lima_coordinates():
     """
@@ -166,6 +174,23 @@ def generate_fact_transactions(atm_ids, num_records=10000):
     
     return pd.DataFrame(transactions_data)
 
+def create_trigger_file(raw_dir):
+    """
+    Crear archivo flag _READY en data/raw/ para señalizar que el lote está completo.
+    
+    Este archivo vacío actúa como trigger para EventBridge en AWS:
+    - Se sube a S3 DESPUÉS de todos los CSVs de datos
+    - EventBridge detecta su creación y dispara la Step Function
+    - Evita condiciones de carrera (el pipeline no arranca con datos parciales)
+    
+    Args:
+        raw_dir (Path): Directorio raíz data/raw/
+    """
+    trigger_path = raw_dir / '_READY'
+    trigger_path.touch()
+    print(f"🚩 Trigger file creado: {trigger_path}")
+    print(f"   → Este archivo señaliza que el lote de datos está completo")
+
 def save_to_csv(df, filename, output_dir):
     """
     Guardar DataFrame a CSV usando pathlib
@@ -245,7 +270,7 @@ def generate_data_quality_report(dim_atms_df, fact_transactions_df):
     print(f"     - Mediana: ${valid_amounts.median():.2f}")
 
 def main():
-    """Función principal para generar todos los datos"""
+    """Función principal para generar todos los datos con soporte incremental"""
     print("🚀 GENERADOR DE DATOS MOCK - ANALÍTICA GEOESPACIAL ATMs LIMA")
     print("=" * 60)
     print()
@@ -254,15 +279,22 @@ def main():
     setup_seeds()
     print("🎲 Semillas configuradas (random.seed=42, Faker.seed=42)")
     
-    # Crear directorio de salida
-    output_dir = create_output_directory()
-    print(f"📁 Directorio de salida: {output_dir}")
+    # Crear directorios de salida (estructura incremental)
+    dir_atms, dir_transactions, dir_raw = create_output_directories()
+    print(f"📁 Directorio ATMs: {dir_atms}")
+    print(f"📁 Directorio Transactions: {dir_transactions}")
+    print()
+    
+    # Timestamp para nombres de archivo incrementales (evita sobreescribir historial)
+    batch_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    print(f"🕐 Batch timestamp: {batch_timestamp}")
     print()
     
     # Generar dimensión de ATMs con georreferenciación
     print("🏧 Generando dimensión de ATMs (Lima, Perú)...")
     dim_atms_df = generate_dim_atms(num_records=50)
-    save_to_csv(dim_atms_df, 'dim_atms.csv', output_dir)
+    atms_filename = f"dim_atms_{batch_timestamp}.csv"
+    save_to_csv(dim_atms_df, atms_filename, dir_atms)
     
     # Obtener lista de IDs de ATMs para referencias
     atm_ids = dim_atms_df['id_atm'].tolist()
@@ -270,13 +302,22 @@ def main():
     # Generar tabla de hechos de transacciones
     print("💳 Generando tabla de transacciones...")
     fact_transactions_df = generate_fact_transactions(atm_ids, num_records=10000)
-    save_to_csv(fact_transactions_df, 'fact_transactions.csv', output_dir)
+    transactions_filename = f"fact_transactions_{batch_timestamp}.csv"
+    save_to_csv(fact_transactions_df, transactions_filename, dir_transactions)
     
     # Generar reporte de calidad
     generate_data_quality_report(dim_atms_df, fact_transactions_df)
     
-    print("\n✨ Generación de datos completada exitosamente!")
-    print(f"📂 Archivos generados en: {output_dir.resolve()}")
+    # ÚLTIMO PASO: Crear archivo trigger _READY
+    # CRÍTICO: Se crea DESPUÉS de todos los CSVs para evitar condiciones de carrera
+    print()
+    create_trigger_file(dir_raw)
+    
+    print(f"\n✨ Generación de datos completada exitosamente!")
+    print(f"📂 Archivos generados:")
+    print(f"   - {dir_atms / atms_filename}")
+    print(f"   - {dir_transactions / transactions_filename}")
+    print(f"   - {dir_raw / '_READY'} (trigger)")
     print("🗺️  Listo para análisis geoespacial con coordenadas de Lima, Perú")
 
 if __name__ == "__main__":

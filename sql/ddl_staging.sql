@@ -33,8 +33,7 @@ CREATE TABLE staging.fact_transactions (
     longitud            FLOAT8,
     capacidad_maxima    BIGINT,
     modelo              VARCHAR(50),
-    estado              VARCHAR(30),
-    fecha_dia           DATE
+    estado              VARCHAR(30)
 );
 
 -- 4. Cargar datos Parquet desde el bucket Silver usando COPY

@@ -319,6 +319,17 @@ resource "aws_iam_role_policy" "sfn_glue_policy" {
           aws_redshiftserverless_namespace.logicash_namespace.arn,
           aws_redshiftserverless_workgroup.logicash_workgroup.arn
         ]
+      },
+      {
+        # Permiso para leer el secreto de credenciales de Redshift
+        # Necesario cuando se usa secret_arn en Redshift Data API
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          aws_secretsmanager_secret.redshift_admin_secret.arn
+        ]
       }
     ]
   })
@@ -418,6 +429,7 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Parameters = {
           WorkgroupName = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
           Database      = "dev"
+          SecretArn     = aws_secretsmanager_secret.redshift_admin_secret.arn
           Sql           = "${templatefile("../sql/ddl_staging.sql", { silver_bucket = aws_s3_bucket.silver_bucket.bucket, redshift_role_arn = aws_iam_role.redshift_serverless_role.arn })}\n${file("../sql/ddl_gold.sql")}"
         }
         ResultPath = "$.RedshiftResult"
@@ -627,7 +639,41 @@ resource "aws_security_group" "redshift_sg" {
   }
 }
 
-# --- 7.2 IAM ROLE PARA REDSHIFT SERVERLESS ---
+# --- 7.2 SEGURIDAD: Contraseña + Secrets Manager ---
+# Genera una contraseña segura y la almacena en Secrets Manager.
+# Elimina la necesidad de credenciales hardcodeadas o procesos manuales.
+
+# Contraseña aleatoria para el usuario admin de Redshift
+resource "random_password" "redshift_admin_password" {
+  length  = 16
+  special = true
+
+  # Redshift no permite / @ " ' espacio en contraseñas
+  override_special = "!#$%^&*()-_=+[]{}|;:,.<>?"
+}
+
+# Secreto en AWS Secrets Manager (la "bóveda")
+resource "aws_secretsmanager_secret" "redshift_admin_secret" {
+  name        = "${local.project_name}/redshift/admin-credentials"
+  description = "Credenciales del usuario admin de Redshift Serverless para LogiCash"
+
+  tags = {
+    Name    = "Redshift Admin Credentials"
+    Project = "LogiCash"
+  }
+}
+
+# Versión del secreto: Almacena el JSON con username y password
+resource "aws_secretsmanager_secret_version" "redshift_admin_secret_value" {
+  secret_id = aws_secretsmanager_secret.redshift_admin_secret.id
+
+  secret_string = jsonencode({
+    username = "admin"
+    password = random_password.redshift_admin_password.result
+  })
+}
+
+# --- 7.3 IAM ROLE PARA REDSHIFT SERVERLESS ---
 # Permite a Redshift leer datos desde S3 (COPY command)
 
 data "aws_iam_policy_document" "redshift_assume_role" {
@@ -657,13 +703,16 @@ resource "aws_iam_role_policy_attachment" "redshift_s3_read" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
 }
 
-# --- 7.3 REDSHIFT SERVERLESS (Namespace + Workgroup) ---
+# --- 7.4 REDSHIFT SERVERLESS (Namespace + Workgroup) ---
 
 # Namespace: Contenedor lógico de la base de datos y configuración
+# Usa credenciales generadas automáticamente (no hardcodeadas)
 resource "aws_redshiftserverless_namespace" "logicash_namespace" {
-  namespace_name = "${local.project_name}-namespace"
-  db_name        = "dev"
-  iam_roles      = [aws_iam_role.redshift_serverless_role.arn]
+  namespace_name      = "${local.project_name}-namespace"
+  db_name             = "dev"
+  admin_username      = "admin"
+  admin_user_password = random_password.redshift_admin_password.result
+  iam_roles           = [aws_iam_role.redshift_serverless_role.arn]
 
   tags = {
     Name    = "LogiCash Redshift Namespace"
@@ -695,7 +744,7 @@ resource "aws_redshiftserverless_workgroup" "logicash_workgroup" {
   }
 }
 
-# --- 7.4 CONTROL DE COSTOS (Usage Limit) ---
+# --- 7.5 CONTROL DE COSTOS (Usage Limit) ---
 # Limita el consumo diario de RPU-hours para proteger los créditos del Free Trial
 resource "aws_redshiftserverless_usage_limit" "compute_limit" {
   resource_arn  = aws_redshiftserverless_workgroup.logicash_workgroup.arn
@@ -705,7 +754,30 @@ resource "aws_redshiftserverless_usage_limit" "compute_limit" {
   breach_action = "log"
 }
 
-# --- 7.5 OUTPUTS ---
+# --- 7.6 BOOTSTRAPPING: SQL Grants automáticos ---
+# Ejecuta GRANT de permisos al rol IAM de Step Functions al crear la infraestructura.
+# Esto permite que la Step Function ejecute SQL en Redshift via Data API
+# sin necesidad de intervención manual post-deploy.
+resource "aws_redshiftdata_statement" "init_redshift_permissions" {
+  workgroup_name = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
+  database       = "dev"
+  secret_arn     = aws_secretsmanager_secret.redshift_admin_secret.arn
+
+  sql = join("; ", [
+    "CREATE USER \"IAMR:${local.project_name}_step_functions_role\" PASSWORD DISABLE",
+    "GRANT USAGE ON DATABASE dev TO \"IAMR:${local.project_name}_step_functions_role\"",
+    "GRANT CREATE ON DATABASE dev TO \"IAMR:${local.project_name}_step_functions_role\"",
+    "ALTER USER \"IAMR:${local.project_name}_step_functions_role\" CREATEUSER"
+  ])
+
+  # Espera a que el Workgroup y el secreto estén disponibles
+  depends_on = [
+    aws_redshiftserverless_workgroup.logicash_workgroup,
+    aws_secretsmanager_secret_version.redshift_admin_secret_value
+  ]
+}
+
+# --- 7.7 OUTPUTS ---
 
 output "redshift_endpoint" {
   description = "Endpoint de conexión para Redshift Serverless"
@@ -715,6 +787,11 @@ output "redshift_endpoint" {
 output "redshift_workgroup_name" {
   description = "Nombre del workgroup para conexión"
   value       = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
+}
+
+output "redshift_secret_arn" {
+  description = "ARN del secreto en Secrets Manager con credenciales de Redshift"
+  value       = aws_secretsmanager_secret.redshift_admin_secret.arn
 }
 
 # ============================================================

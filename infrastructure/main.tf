@@ -654,8 +654,9 @@ resource "random_password" "redshift_admin_password" {
 
 # Secreto en AWS Secrets Manager (la "bóveda")
 resource "aws_secretsmanager_secret" "redshift_admin_secret" {
-  name        = "${local.project_name}/redshift/admin-credentials"
-  description = "Credenciales del usuario admin de Redshift Serverless para LogiCash"
+  name                    = "${local.project_name}/redshift/admin-credentials"
+  description             = "Credenciales del usuario admin de Redshift Serverless para LogiCash"
+  recovery_window_in_days = 0 # Eliminación inmediata al hacer terraform destroy (sin soft-delete)
 
   tags = {
     Name    = "Redshift Admin Credentials"
@@ -763,12 +764,26 @@ resource "aws_redshiftdata_statement" "init_redshift_permissions" {
   database       = "dev"
   secret_arn     = aws_secretsmanager_secret.redshift_admin_secret.arn
 
-  sql = join("; ", [
-    "CREATE USER \"IAMR:${local.project_name}_step_functions_role\" PASSWORD DISABLE",
-    "GRANT USAGE ON DATABASE dev TO \"IAMR:${local.project_name}_step_functions_role\"",
-    "GRANT CREATE ON DATABASE dev TO \"IAMR:${local.project_name}_step_functions_role\"",
-    "ALTER USER \"IAMR:${local.project_name}_step_functions_role\" CREATEUSER"
-  ])
+  sql = <<-EOF
+    -- Definir procedimiento para creación condicional
+    CREATE OR REPLACE PROCEDURE public.sp_setup_logicash_permissions()
+    AS $$
+    BEGIN
+        -- 1. Crear usuario SOLO si no existe (Rompe el ciclo de error)
+        IF NOT EXISTS (SELECT 1 FROM pg_user WHERE usename = 'IAMR:${local.project_name}_step_functions_role') THEN
+            CREATE USER "IAMR:${local.project_name}_step_functions_role" PASSWORD DISABLE;
+        END IF;
+
+        -- 2. Asignar permisos válidos (SOLO CREATE, no USAGE)
+        -- Nota: Redshift NO soporta GRANT USAGE ON DATABASE
+        GRANT CREATE ON DATABASE dev TO "IAMR:${local.project_name}_step_functions_role";
+        ALTER USER "IAMR:${local.project_name}_step_functions_role" CREATEUSER;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    -- Ejecutar el procedimiento
+    CALL public.sp_setup_logicash_permissions();
+  EOF
 
   # Espera a que el Workgroup y el secreto estén disponibles
   depends_on = [

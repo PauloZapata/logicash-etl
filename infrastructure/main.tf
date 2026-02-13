@@ -418,10 +418,10 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
         Next       = "RunRedshiftSQL"
       }
 
-      # Paso 6: Cargar datos Silver a Redshift Serverless
+      # Paso 6: Cargar datos Silver a Redshift Serverless + Exportar Gold a S3
       # SQL leído desde archivos locales para Single Source of Truth:
-      #   - sql/ddl_staging.sql → templatefile() (inyecta bucket y role ARN)
-      #   - sql/ddl_gold.sql   → file() (SQL puro, sin variables)
+      #   - sql/ddl_staging.sql → templatefile() (inyecta bucket Silver y role ARN)
+      #   - sql/ddl_gold.sql   → templatefile() (inyecta bucket Gold y role ARN para UNLOAD)
       # Terraform concatena ambos en un solo bloque SQL en tiempo de plan.
       RunRedshiftSQL = {
         Type     = "Task"
@@ -430,7 +430,7 @@ resource "aws_sfn_state_machine" "etl_pipeline" {
           WorkgroupName = aws_redshiftserverless_workgroup.logicash_workgroup.workgroup_name
           Database      = "dev"
           SecretArn     = aws_secretsmanager_secret.redshift_admin_secret.arn
-          Sql           = "${templatefile("../sql/ddl_staging.sql", { silver_bucket = aws_s3_bucket.silver_bucket.bucket, redshift_role_arn = aws_iam_role.redshift_serverless_role.arn })}\n${file("../sql/ddl_gold.sql")}"
+          Sql           = "${templatefile("../sql/ddl_staging.sql", { silver_bucket = aws_s3_bucket.silver_bucket.bucket, redshift_role_arn = aws_iam_role.redshift_serverless_role.arn })}\n${templatefile("../sql/ddl_gold.sql", { gold_bucket = aws_s3_bucket.gold_bucket.bucket, redshift_role_arn = aws_iam_role.redshift_serverless_role.arn })}"
         }
         ResultPath = "$.RedshiftResult"
         Next       = "WaitForRedshift"
@@ -698,10 +698,10 @@ resource "aws_iam_role" "redshift_serverless_role" {
   }
 }
 
-# Política S3 ReadOnly para ejecutar COPY desde el bucket Silver
-resource "aws_iam_role_policy_attachment" "redshift_s3_read" {
+# Política S3 FullAccess para ejecutar COPY (lectura Silver) y UNLOAD (escritura Gold)
+resource "aws_iam_role_policy_attachment" "redshift_s3_access" {
   role       = aws_iam_role.redshift_serverless_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
 # --- 7.4 REDSHIFT SERVERLESS (Namespace + Workgroup) ---

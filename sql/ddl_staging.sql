@@ -23,7 +23,7 @@ DROP TABLE IF EXISTS staging.fact_transactions;
 -- 3. Crear tabla de staging con esquema explícito
 CREATE TABLE staging.fact_transactions (
     id_transaccion      VARCHAR(36),
-    id_atm              VARCHAR(10),
+    id_atm              VARCHAR(50),
     fecha               TIMESTAMP,
     monto               DECIMAL(18,2),
     tipo_movimiento     VARCHAR(20),

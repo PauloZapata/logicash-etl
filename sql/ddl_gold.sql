@@ -33,14 +33,14 @@ DROP TABLE IF EXISTS gold.rpt_diario_balance;
 CREATE TABLE gold.rpt_diario_balance AS
 SELECT
     id_atm,
-    fecha_dia,
+    TRUNC(fecha) AS fecha_dia,
     COUNT(*) AS total_transacciones,
     SUM(CASE WHEN tipo_movimiento = 'DEPOSITO' THEN monto ELSE 0 END) AS total_depositos,
     SUM(CASE WHEN tipo_movimiento = 'RETIRO' THEN monto ELSE 0 END) AS total_retiros,
     (SUM(CASE WHEN tipo_movimiento = 'DEPOSITO' THEN monto ELSE 0 END) -
      SUM(CASE WHEN tipo_movimiento = 'RETIRO' THEN monto ELSE 0 END)) AS flujo_neto_dia
 FROM staging.fact_transactions
-GROUP BY id_atm, fecha_dia;
+GROUP BY id_atm, TRUNC(fecha);
 
 -- 4. RANKING DE ATMs POR VOLUMEN TOTAL
 -- Top ATMs por dinero total movido, útil para priorizar recargas.

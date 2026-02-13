@@ -774,10 +774,9 @@ resource "aws_redshiftdata_statement" "init_redshift_permissions" {
             CREATE USER "IAMR:${local.project_name}_step_functions_role" PASSWORD DISABLE;
         END IF;
 
-        -- 2. Asignar permisos válidos (SOLO CREATE, no USAGE)
-        -- Nota: Redshift NO soporta GRANT USAGE ON DATABASE
+        -- 2. Asignar permiso de creación (Suficiente para crear schemas)
+        -- Nota: ALTER USER CREATEUSER no es compatible con PASSWORD DISABLE
         GRANT CREATE ON DATABASE dev TO "IAMR:${local.project_name}_step_functions_role";
-        ALTER USER "IAMR:${local.project_name}_step_functions_role" CREATEUSER;
     END;
     $$ LANGUAGE plpgsql;
 
